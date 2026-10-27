@@ -1,0 +1,11 @@
+services:
+  safelink-api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # Optional local service-account JSON. Do not commit this file.
+      - ./secrets:/app/secrets:ro
+    restart: unless-stopped

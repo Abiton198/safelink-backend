@@ -1,0 +1,51 @@
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Firebase and service-account credentials
+secrets/
+**/secrets/
+*service-account*.json
+*serviceAccount*.json
+firebase-adminsdk-*.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+logs/
+
+# IDE and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build and distribution
+build/
+dist/
+*.egg-info/
+
+# Local databases and temporary files
+*.sqlite3
+*.db
+tmp/
+temp/
