@@ -6,7 +6,6 @@ from app.core.auth import current_user
 from app.core.firebase import db
 from app.schemas.emergency import ProfileUpdate, ContactCreate, ContactUpdate, VehicleCreate, VehicleUpdate, QRCreate
 from app.services.emergency import profile_ref, require_profile, dob_digest, now_utc
-from app.services.subscriptions import require_active_subscription
 from app.config import settings
 
 router = APIRouter(tags=["Emergency profile and QR tags"])
@@ -14,9 +13,9 @@ router = APIRouter(tags=["Emergency profile and QR tags"])
 def owner_uid(user: dict) -> str:
     return user["uid"]
 
-def owner_guard(user: dict):
-    require_active_subscription(owner_uid(user))
-    return owner_uid(user)
+def owner_guard(user: dict) -> str:
+    """Allow profile setup and editing before the user subscribes."""
+    return user["uid"]
 
 def clean_record(data: dict) -> dict:
     return {k: v for k, v in data.items() if k not in {"dob_hmac"}}

@@ -22,6 +22,17 @@ def verify_scanned_qr(token: str, body: DOBVerification, request: Request):
     if not qr_snap.exists:
         raise HTTPException(status_code=404, detail="SafeLink tag not found.")
     qr = qr_snap.to_dict() or {}
+
+    owner_uid = qr.get("owner_uid")
+
+    if not owner_uid:
+        raise HTTPException(
+            status_code=409,
+            detail="This SafeLink tag has not been activated by its owner yet.",
+        )
+
+    require_active_subscription(owner_uid)
+    
     if not qr.get("active", False):
         raise HTTPException(status_code=410, detail="This SafeLink tag has been deactivated.")
     # Subscription is checked before a verification can release emergency data.
