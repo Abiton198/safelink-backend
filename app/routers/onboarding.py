@@ -1,14 +1,13 @@
-"""Onboarding progress endpoints.
+"""Onboarding progress endpoints (save / skip / resume the setup wizard).
+
+Registered in main.py with prefix "/api/v1", so the full addresses are:
 
     GET /api/v1/onboarding/me   -> where the owner stopped (defaults if new)
     PUT /api/v1/onboarding/me   -> remember where they are
 
-Deliberately NOT protected by `require_active_subscription`: onboarding
-happens BEFORE the person subscribes.
-
-authentication dependency your other owner routers already use (the one that
-gives you the signed-in user's uid). If you send me your profile router I
-will match it exactly.
+Deliberately NOT protected by a subscription check: onboarding happens
+BEFORE the person subscribes. Same rule as the other owner endpoints in
+routers/emergency.py.
 """
 
 from typing import Literal
@@ -19,7 +18,7 @@ from pydantic import BaseModel, Field
 from app.core.auth import current_user
 from app.services import onboarding as onboarding_service
 
-router = APIRouter(prefix="/onboarding", tags=["onboarding"])
+router = APIRouter(tags=["Onboarding"])
 
 # Only the steps that can be saved or skipped.
 StepName = Literal["profile", "contacts", "vehicle", "tag"]
@@ -35,16 +34,16 @@ class OnboardingProgressIn(BaseModel):
     done: bool = False
 
 
-@router.get("/me")
-def read_my_progress(user=Depends(current_user)):
+@router.get("/onboarding/me")
+def read_my_progress(user: dict = Depends(current_user)):
     """Return this user's onboarding progress."""
     return onboarding_service.get_progress(user["uid"])
 
 
-@router.put("/me")
+@router.put("/onboarding/me")
 def save_my_progress(
     body: OnboardingProgressIn,
-    user=Depends(current_user),
+    user: dict = Depends(current_user),
 ):
     """Save this user's onboarding progress (no subscription needed)."""
     return onboarding_service.save_progress(

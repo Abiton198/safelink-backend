@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
-from app.routers import health, subscriptions, payfast, emergency, public_emergency
+from app.routers import health, subscriptions, payfast, emergency, public_emergency,onboarding
 
 app = FastAPI(
     title="SafeLink API",
@@ -24,6 +24,7 @@ app.include_router(subscriptions.router, prefix="/api/v1")
 app.include_router(payfast.router, prefix="/api/v1")
 app.include_router(emergency.router, prefix="/api/v1")
 app.include_router(public_emergency.router, prefix="/api/v1")
+app.include_router(onboarding.router, prefix="/api/v1")
 
 @app.get("/")
 def root():

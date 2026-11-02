@@ -1,5 +1,19 @@
-"""Authenticated owner endpoints for profile, emergency contacts, vehicles, and QR tags."""
-from datetime import datetime, timezone
+"""Authenticated owner endpoints for profile, emergency contacts, vehicles, and QR tags.
+
+ALIGNMENT WITH THE FRONTEND ONBOARDING
+--------------------------------------
+Owners may SAVE or SKIP any setup step, in any order, BEFORE subscribing.
+So none of these endpoints needs a subscription, and none of them may demand
+that a profile already exists:
+
+  * GET /profile/me returns an empty profile for a brand-new user
+    (instead of a 404 error).
+  * Listing and adding contacts / vehicles works even if the profile step
+    was skipped.
+
+Emergency information is only RELEASED to a scanner by public_emergency.py,
+which is where the subscription is enforced.
+"""
 from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, status
 from app.core.auth import current_user
@@ -23,8 +37,19 @@ def clean_record(data: dict) -> dict:
 @router.get("/profile/me")
 def get_my_profile(user: dict = Depends(current_user)):
     uid = owner_guard(user)
-    profile = require_profile(uid)
-    return clean_record(profile)
+    snap = profile_ref(uid).get()
+    if not snap.exists:
+        # New user who has not saved a profile yet (or skipped that step).
+        # This is a normal state during onboarding, so it is not an error.
+        return {
+            "owner_uid": uid,
+            "display_name": "",
+            "emergency_summary": "",
+            "medical_notes": "",
+            "preferred_language": "en",
+            "profile_exists": False,
+        }
+    return clean_record(snap.to_dict() or {})
 
 @router.put("/profile/me")
 def upsert_my_profile(body: ProfileUpdate, user: dict = Depends(current_user)):
@@ -49,7 +74,7 @@ def upsert_my_profile(body: ProfileUpdate, user: dict = Depends(current_user)):
 @router.get("/profile/me/contacts")
 def list_contacts(user: dict = Depends(current_user)):
     uid = owner_guard(user)
-    require_profile(uid)
+    # No profile required: contacts can be added before the profile step.
     docs = db.collection("emergency_contacts").where("owner_uid", "==", uid).stream()
     records = [dict(d.to_dict() or {}, contact_id=d.id) for d in docs]
     return {"contacts": sorted(records, key=lambda x: (x.get("priority", 10), x.get("name", "")))}
@@ -57,7 +82,7 @@ def list_contacts(user: dict = Depends(current_user)):
 @router.post("/profile/me/contacts", status_code=status.HTTP_201_CREATED)
 def create_contact(body: ContactCreate, user: dict = Depends(current_user)):
     uid = owner_guard(user)
-    require_profile(uid)
+    # No profile required (the profile step may have been skipped).
     contact_id = uuid4().hex
     payload = body.model_dump()
     payload.update({"owner_uid": uid, "created_at": now_utc(), "updated_at": now_utc()})
@@ -91,14 +116,14 @@ def delete_contact(contact_id: str, user: dict = Depends(current_user)):
 @router.get("/profile/me/vehicles")
 def list_vehicles(user: dict = Depends(current_user)):
     uid = owner_guard(user)
-    require_profile(uid)
+    # No profile required: vehicles can be added before the profile step.
     docs = db.collection("vehicles").where("owner_uid", "==", uid).stream()
     return {"vehicles": [dict(d.to_dict() or {}, vehicle_id=d.id) for d in docs]}
 
 @router.post("/profile/me/vehicles", status_code=status.HTTP_201_CREATED)
 def create_vehicle(body: VehicleCreate, user: dict = Depends(current_user)):
     uid = owner_guard(user)
-    require_profile(uid)
+    # No profile required (the profile step may have been skipped).
     vehicle_id = uuid4().hex
     payload = body.model_dump()
     payload.update({"owner_uid": uid, "created_at": now_utc(), "updated_at": now_utc()})

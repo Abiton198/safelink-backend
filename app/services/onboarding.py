@@ -1,8 +1,8 @@
 """Firestore storage for onboarding progress ("save and resume later").
 
 The information the owner enters (profile, contacts, vehicles, tags) is
-stored by its own services. This module stores only WHERE they stopped in the
-wizard, so they can resume on any device:
+stored by the emergency router. This module stores only WHERE they stopped in
+the wizard, so they can resume on any device:
 
     onboarding/{uid} = {
         step: int,            # slide they were on
@@ -14,11 +14,11 @@ wizard, so they can resume on any device:
     }
 
 This is progress for the UI only. It never grants access to anything;
-emergency access depends solely on the subscription (see subscriptions.py).
+emergency access depends solely on the subscription.
 """
 
 from app.core.firebase import db
-from app.services.subscriptions import now_utc
+from app.services.emergency import now_utc
 
 COLLECTION = "onboarding"
 
