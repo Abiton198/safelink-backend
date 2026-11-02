@@ -22,9 +22,15 @@ class Settings(BaseSettings):
     subscription_monthly_amount: str = "19.99"
     trial_days: int = 7
     subscription_grace_days: int = 7
+    dob_hmac_secret: str = ""  # Secret key used to hash dates of birth.
 
     @property
     def cors_origins(self) -> List[str]:
         return [origin.strip() for origin in self.cors_origins_csv.split(",") if origin.strip()]
 
+
 settings = Settings()
+
+secret = settings.dob_hmac_secret
+if not secret:
+    raise RuntimeError("DOB_HMAC_SECRET is not configured.")
