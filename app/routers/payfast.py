@@ -38,6 +38,9 @@ from app.services.subscriptions import (
     get_subscription,
     normalise_datetime,
 )
+import logging
+from app.core.payfast import generate_signature, passphrase_problems, validate_itn_with_payfast
+logger = logging.getLogger("uvicorn.error")
 
 router = APIRouter(prefix="/payments/payfast", tags=["PayFast"])
 
@@ -61,6 +64,17 @@ def create_checkout(body: CheckoutRequest, request: Request, user: dict = Depend
     No subscription is needed to reach this endpoint: it is the LAST step of
     onboarding, after the owner has saved or skipped the earlier steps.
     """
+
+    # inside create_checkout, just before computing the signature:
+    logger.info(
+        "PayFast checkout: sandbox=%s process_url=%s merchant_id=%s passphrase_len=%d problems=%s",
+        settings.payfast_sandbox,
+        settings.payfast_process_url,
+        settings.payfast_merchant_id,
+        len(settings.payfast_passphrase),
+        passphrase_problems(settings.payfast_passphrase) or "none",
+    )
+
     if not body.accepted_recurring_terms:
         raise HTTPException(status_code=400, detail="You must agree to the recurring subscription terms.")
     if not settings.payfast_merchant_id or not settings.payfast_merchant_key or not settings.payfast_passphrase:
