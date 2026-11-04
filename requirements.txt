@@ -4,3 +4,5 @@ firebase-admin>=6.5,<8.0
 pydantic-settings>=2.4,<3.0
 python-multipart>=0.0.9
 requests>=2.32,<3.0
+Pillow
+python-multipart

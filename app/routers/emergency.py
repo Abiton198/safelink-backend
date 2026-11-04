@@ -15,12 +15,13 @@ Emergency information is only RELEASED to a scanner by public_emergency.py,
 which is where the subscription is enforced.
 """
 from uuid import uuid4
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from app.core.auth import current_user
 from app.core.firebase import db
 from app.schemas.emergency import ProfileUpdate, ContactCreate, ContactUpdate, VehicleCreate, VehicleUpdate, QRCreate
 from app.services.emergency import profile_ref, require_profile, dob_digest, now_utc
 from app.config import settings
+from app.services import vehicle_images
 
 router = APIRouter(tags=["Emergency profile and QR tags"])
 
@@ -33,6 +34,14 @@ def owner_guard(user: dict) -> str:
 
 def clean_record(data: dict) -> dict:
     return {k: v for k, v in data.items() if k not in {"dob_hmac"}}
+
+def vehicle_out(vehicle_id: str, data: dict) -> dict:
+    """A vehicle as the browser sees it: photos become {image_id, url} only.
+    Storage paths never leave the server."""
+    record = {k: v for k, v in data.items() if k != "images"}
+    record["vehicle_id"] = vehicle_id
+    record["images"] = vehicle_images.public_images(data)
+    return record
 
 @router.get("/profile/me")
 def get_my_profile(user: dict = Depends(current_user)):
@@ -118,7 +127,7 @@ def list_vehicles(user: dict = Depends(current_user)):
     uid = owner_guard(user)
     # No profile required: vehicles can be added before the profile step.
     docs = db.collection("vehicles").where("owner_uid", "==", uid).stream()
-    return {"vehicles": [dict(d.to_dict() or {}, vehicle_id=d.id) for d in docs]}
+    return {"vehicles": [vehicle_out(d.id, d.to_dict() or {}) for d in docs]}
 
 @router.post("/profile/me/vehicles", status_code=status.HTTP_201_CREATED)
 def create_vehicle(body: VehicleCreate, user: dict = Depends(current_user)):
@@ -126,7 +135,7 @@ def create_vehicle(body: VehicleCreate, user: dict = Depends(current_user)):
     # No profile required (the profile step may have been skipped).
     vehicle_id = uuid4().hex
     payload = body.model_dump()
-    payload.update({"owner_uid": uid, "created_at": now_utc(), "updated_at": now_utc()})
+    payload.update({"owner_uid": uid, "images": [], "created_at": now_utc(), "updated_at": now_utc()})
     db.collection("vehicles").document(vehicle_id).set(payload)
     return {"vehicle_id": vehicle_id, **payload}
 
@@ -142,7 +151,7 @@ def update_vehicle(vehicle_id: str, body: VehicleUpdate, user: dict = Depends(cu
         raise HTTPException(status_code=400, detail="No changes supplied.")
     changes["updated_at"] = now_utc()
     ref.update(changes)
-    return {"vehicle_id": vehicle_id, **(ref.get().to_dict() or {})}
+    return vehicle_out(vehicle_id, ref.get().to_dict() or {})
 
 @router.delete("/profile/me/vehicles/{vehicle_id}")
 def delete_vehicle(vehicle_id: str, user: dict = Depends(current_user)):
@@ -151,8 +160,21 @@ def delete_vehicle(vehicle_id: str, user: dict = Depends(current_user)):
     snap = ref.get()
     if not snap.exists or (snap.to_dict() or {}).get("owner_uid") != uid:
         raise HTTPException(status_code=404, detail="Vehicle not found.")
+    vehicle_images.delete_all_images(snap.to_dict() or {})
     ref.delete()
     return {"message": "Vehicle deleted."}
+
+@router.post("/profile/me/vehicles/{vehicle_id}/images", status_code=status.HTTP_201_CREATED)
+def upload_vehicle_image(vehicle_id: str, file: UploadFile = File(...), user: dict = Depends(current_user)):
+    """Add one photo (maximum 5 per vehicle). No subscription needed."""
+    uid = owner_guard(user)
+    return vehicle_images.add_image(uid, vehicle_id, file)
+
+@router.delete("/profile/me/vehicles/{vehicle_id}/images/{image_id}")
+def delete_vehicle_image(vehicle_id: str, image_id: str, user: dict = Depends(current_user)):
+    uid = owner_guard(user)
+    vehicle_images.delete_image(uid, vehicle_id, image_id)
+    return {"message": "Photo deleted."}
 
 @router.get("/qr-tags")
 def list_qr_tags(user: dict = Depends(current_user)):

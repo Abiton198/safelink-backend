@@ -73,13 +73,16 @@ class Settings(BaseSettings):
     firebase_project_id: str = ""
     firebase_service_account_json: str = ""
     google_application_credentials: str = ""
+    # Firebase Storage bucket for vehicle photos, e.g. "your-project.appspot.com"
+    # (shown in Firebase console -> Storage). Photos stay private.
+    firebase_storage_bucket: str = ""
 
     # PayFast
     payfast_merchant_id: str = ""
     payfast_merchant_key: str = ""
     payfast_passphrase: str = ""
     # True = sandbox (testing). Set PAYFAST_SANDBOX=false on live only.
-    payfast_sandbox: bool = False
+    payfast_sandbox: bool = True
     # Optional overrides; normally left empty and chosen by payfast_sandbox.
     payfast_process_url: str = ""
     payfast_itn_validate_url: str = ""
