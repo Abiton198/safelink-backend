@@ -2,8 +2,7 @@
 
 Every deployment-specific value (website addresses, secrets, PayFast keys)
 is read from environment variables or from a local `.env` file. On Render,
-set them under the service's "Environment" tab. See `.env.example` for the
-full list.
+set  under the service's "Environment" tab. 
 
 Local development
 -----------------
@@ -86,6 +85,11 @@ class Settings(BaseSettings):
     # Optional overrides; normally left empty and chosen by payfast_sandbox.
     payfast_process_url: str = ""
     payfast_itn_validate_url: str = ""
+
+    # Tag claiming. When true, a tag can only be claimed after the business has
+    # marked it as sold (`sold: true` on its record). When false, any tag that
+    # has no owner yet can be claimed by whoever scans it first.
+    tag_claim_requires_sold: bool = False
 
     # Pricing and billing
     subscription_monthly_amount: str = "19.99"

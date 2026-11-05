@@ -45,6 +45,23 @@ def verify_scanned_qr(token: str, body: DOBVerification, request: Request):
         "expires_in_seconds": 600,
     }
 
+@router.get("/qr/{token}/status")
+def tag_status(token: str):
+    """Is this tag switched on? Status only, never personal information.
+
+    Lets the scan page offer "this is my tag, claim it" for a tag nobody has
+    claimed yet. The subscription is deliberately NOT revealed here.
+    """
+    if len(token) < 30 or len(token) > 200:
+        raise HTTPException(status_code=404, detail="SafeLink tag not found.")
+    qr_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    snap = db.collection("qr_devices").document(qr_hash).get()
+    if not snap.exists:
+        raise HTTPException(status_code=404, detail="SafeLink tag not found.")
+    qr = snap.to_dict() or {}
+    ready = bool(qr.get("owner_uid")) and bool(qr.get("active", False))
+    return {"state": "ready" if ready else "not_activated"}
+
 @router.get("/emergency")
 def get_emergency_details(access_token: str):
     # Short-lived access token is passed as query parameter because this route is intended

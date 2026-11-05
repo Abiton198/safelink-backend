@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.routers import health, subscriptions, payfast, emergency, public_emergency, onboarding
+from app.routers import health, subscriptions, payfast, emergency, public_emergency, onboarding, qr_claim
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -126,6 +126,7 @@ app.include_router(payfast.router, prefix="/api/v1")
 app.include_router(emergency.router, prefix="/api/v1")
 app.include_router(public_emergency.router, prefix="/api/v1")
 app.include_router(onboarding.router, prefix="/api/v1")
+app.include_router(qr_claim.router, prefix="/api/v1")
 
 
 @app.get("/")
