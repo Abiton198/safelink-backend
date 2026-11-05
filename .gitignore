@@ -49,3 +49,12 @@ dist/
 *.db
 tmp/
 temp/
+
+# Generated tag batches and QR sheets (contain secret tag addresses)
+*.csv
+*.pdf
+batch*.csv
+qr*.pdf
+output/
+out/
+batch*.pdf
