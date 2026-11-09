@@ -1,24 +1,31 @@
 """Claiming a physical SafeLink tag by scanning it (no serial numbers).
 
+WHERE THE DATA LIVES
+--------------------
+  qr_devices/{sha256(token)}        the global REGISTRY (a scan knows only the
+                                    token, so tags must be findable by hash).
+                                    Holds tag_ref, sold, owner_uid, owner_ref,
+                                    active and the lock-out counters.
+  users/{name}__{uid}/tags/{qrId}   the OWNER's record of the tag (label,
+                                    tag_ref, claimed_at), created on claim.
+
 How it fits together
 --------------------
-* The business creates a batch of UNCLAIMED tags (scripts/generate_tags.py).
-  Each is a record in `qr_devices` with no `owner_uid`, plus the QR address
-  `<frontend>/scan/<token>` that is printed on the tag. Only the SHA-256 hash
-  of the token is stored.
+* The business creates UNCLAIMED tags (scripts/generate_tags.py): registry
+  records with no owner. Only the hash of each token is stored.
 * The customer scans the tag. The app reads the token from the QR code and
-  asks us to LOOK IT UP: we answer with the tag's details (reference, name)
-  so the form can be filled in automatically. Nothing is changed.
-* The customer presses Confirm. We then LINK the tag to their account and
-  switch it on, inside a transaction so two people can never both claim it.
+  asks us to LOOK IT UP: we answer with the tag's details so the form can be
+  filled in automatically. Nothing is changed.
+* The customer presses Confirm. We LINK the tag to their account and switch it
+  on, inside a transaction so two people can never both claim it.
 
 Security notes
 --------------
-* Scanning proves the person can see the QR code on the tag. Once a tag has
-  an owner it can never be claimed again, and reading its data still needs
-  the owner's date of birth (see public_emergency.py).
+* Scanning proves the person can see the QR code on the tag. Once a tag has an
+  owner it can never be claimed again, and reading its data still needs the
+  owner's date of birth (see public_emergency.py).
 * Set TAG_CLAIM_REQUIRES_SOLD=true so only tags the business has marked as
-  sold can be claimed. That stops someone claiming a tag from a shop shelf.
+  sold can be claimed.
 * A missing, unknown or already-claimed tag gets a clear message but never
   reveals WHO owns it.
 """
@@ -30,13 +37,13 @@ from google.cloud import firestore
 
 from app.config import settings
 from app.core.firebase import db
-from app.services.emergency import now_utc
+from app.services import userstore
 
 COLLECTION = "qr_devices"
 
 
 def token_hash(token: str) -> str:
-    """The record id of a tag: SHA-256 of the secret token in its QR code."""
+    """The registry id of a tag: SHA-256 of the secret token in its QR code."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
@@ -45,7 +52,7 @@ def valid_token_shape(token: str) -> bool:
 
 
 def decide_claim(data: dict | None, uid: str, requires_sold: bool) -> str:
-    """Pure decision about a tag record (easy to test, no database).
+    """Pure decision about a registry record (easy to test, no database).
 
     Returns one of:
       not_found    no such tag
@@ -108,38 +115,73 @@ def lookup(uid: str, token: str) -> dict:
 
 
 @firestore.transactional
-def _link_tag(transaction, ref, uid: str, label: str, requires_sold: bool):
+def _link_tag(transaction, registry_ref, tag_doc_ref, uid, owner_ref_id, label, requires_sold):
     """Link the tag to the user, unless someone got there first."""
-    snap = ref.get(transaction=transaction)
+    snap = registry_ref.get(transaction=transaction)
     data = (snap.to_dict() or {}) if snap.exists else None
 
+    # All reads first, then writes (a Firestore transaction rule).
+    tag_snap = tag_doc_ref.get(transaction=transaction)
     state = decide_claim(data, uid, requires_sold)
+    now = userstore.now_utc()
+
+    if state == "yours":
+        # Already theirs. Never overwrite a name they chose; only make sure
+        # their own record of the tag exists, and apply a new name if one was typed.
+        own = (tag_snap.to_dict() or {}) if tag_snap.exists else {}
+        if not tag_snap.exists:
+            transaction.set(tag_doc_ref, {
+                "qr_id": registry_ref.id,
+                "tag_ref": data.get("tag_ref", ""),
+                "label": label or data.get("label") or "SafeLink tag",
+                "claimed_at": data.get("claimed_at") or now,
+                "created_at": now,
+            })
+        elif label:
+            transaction.update(tag_doc_ref, {"label": label})
+        shown = label or own.get("label") or data.get("label") or "SafeLink tag"
+        return "yours", {**data, "label": shown}
+
     if state != "available":
         return state, data
 
-    now = now_utc()
-    changes = {
+    chosen_label = label or data.get("label") or "SafeLink tag"
+    registry_changes = {
         "owner_uid": uid,
-        "label": label or data.get("label") or "SafeLink tag",
+        "owner_ref": owner_ref_id,   # this person's document name
         "active": True,
         "claimed_at": now,
         "updated_at": now,
         "failed_attempts": 0,
         "locked_until": None,
     }
-    transaction.update(ref, changes)
-    return "claimed_now", {**data, **changes}
+    transaction.update(registry_ref, registry_changes)
+    transaction.set(tag_doc_ref, {
+        "qr_id": registry_ref.id,
+        "tag_ref": data.get("tag_ref", ""),
+        "label": chosen_label,
+        "claimed_at": now,
+        "created_at": now,
+    })
+    return "claimed_now", {**data, **registry_changes, "label": chosen_label}
 
 
-def confirm(uid: str, token: str, label: str) -> dict:
+def confirm(user: dict, token: str, label: str) -> dict:
     """Links the scanned tag to this user and switches it on."""
     if not valid_token_shape(token):
         raise HTTPException(status_code=404, detail=_PROBLEMS["not_found"][1])
 
+    user_ref = userstore.ensure_user_ref(user)
     qr_id = token_hash(token)
-    ref = db.collection(COLLECTION).document(qr_id)
+
     state, data = _link_tag(
-        db.transaction(), ref, uid, label.strip()[:80], _requires_sold()
+        db.transaction(),
+        db.collection(COLLECTION).document(qr_id),
+        userstore.tags_col(user_ref).document(qr_id),
+        user["uid"],
+        user_ref.id,
+        label.strip()[:80],
+        _requires_sold(),
     )
 
     if state not in ("claimed_now", "yours"):

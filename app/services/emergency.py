@@ -1,4 +1,21 @@
-"""Emergency profile, QR token, and short-lived emergency-access helpers."""
+"""Emergency profile, QR token, and short-lived emergency-access helpers.
+
+WHERE THE DATA LIVES  (see services/userstore.py for the whole structure)
+-------------------------------------------------------------------------
+  users/{name}__{uid}/profile/main   the person's emergency profile
+                                     (read here through `userstore`)
+  qr_devices/{sha256(token)}         tag registry: owner_uid, active, and the
+                                     date-of-birth lock-out counters
+  emergency_access_tokens/{hash}     the short-lived (10 minute) token issued
+                                     after a successful date-of-birth check.
+                                     Top-level ON PURPOSE: a scanner presents
+                                     only this token, with no idea who owns
+                                     it, so it must be findable by its hash.
+                                     Tip: add a Firestore TTL policy on its
+                                     `expires_at` field so expired tokens that
+                                     were never presented are removed
+                                     automatically.
+"""
 import hashlib
 import hmac
 import secrets
@@ -6,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
 from app.config import settings
 from app.core.firebase import db
+from app.services import userstore
 
 def now_utc():
     return datetime.now(timezone.utc)
@@ -20,13 +38,15 @@ def dob_digest(dob_iso: str) -> str:
     return hmac.new(secret.encode("utf-8"), dob_iso.encode("utf-8"), hashlib.sha256).hexdigest()
 
 def profile_ref(uid: str):
-    return db.collection("emergency_profiles").document(uid)
+    """The person's profile document: users/{name}__{uid}/profile/main.
+
+    Returns an empty stand-in when the person has no data yet, so
+    `profile_ref(uid).get()` keeps working like it did before.
+    """
+    return userstore.profile_ref(uid)
 
 def require_profile(uid: str) -> dict:
-    snap = profile_ref(uid).get()
-    if not snap.exists:
-        raise HTTPException(status_code=404, detail="Emergency profile not found. Create your profile first.")
-    return snap.to_dict() or {}
+    return userstore.require_profile(uid)
 
 def public_profile_view(profile: dict) -> dict:
     """Only fields deliberately approved for emergency disclosure."""

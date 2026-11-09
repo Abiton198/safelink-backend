@@ -2,7 +2,8 @@
 
 Every deployment-specific value (website addresses, secrets, PayFast keys)
 is read from environment variables or from a local `.env` file. On Render,
-set  under the service's "Environment" tab. 
+set them under the service's "Environment" tab. See `.env.example` for the
+full list.
 
 Local development
 -----------------

@@ -1,26 +1,24 @@
-"""Firestore storage for onboarding progress ("save and resume later").
+"""Onboarding progress ("save and resume later").
 
-The information the owner enters (profile, contacts, vehicles, tags) is
-stored by the emergency router. This module stores only WHERE they stopped in
-the wizard, so they can resume on any device:
+WHERE THE DATA LIVES
+--------------------
+The `onboarding` map inside the person's root document (users/{name}__{uid}):
 
-    onboarding/{uid} = {
-        step: int,            # slide they were on
-        saved: [str],         # steps whose form was saved
-        skipped: [str],       # steps they skipped
+    onboarding: {
+        step: int,          # slide they were on
+        saved: [str],       # steps whose form was saved
+        skipped: [str],     # steps they skipped
         started: bool,
-        done: bool,           # reached the final submit
+        done: bool,         # finished (card added / subscription confirmed)
         updated_at: datetime,
     }
 
-This is progress for the UI only. It never grants access to anything;
-emergency access depends solely on the subscription.
+What the person TYPED (profile, contacts, vehicles, tags) is stored by the
+emergency router. This is only WHERE they stopped in the wizard. It never
+grants access to anything.
 """
 
-from app.core.firebase import db
-from app.services.emergency import now_utc
-
-COLLECTION = "onboarding"
+from app.services import userstore
 
 DEFAULT_PROGRESS = {
     "exists": False,
@@ -33,13 +31,15 @@ DEFAULT_PROGRESS = {
 
 
 def get_progress(uid: str) -> dict:
-    """Return the saved progress, or defaults if none exists yet."""
-    doc = db.collection(COLLECTION).document(uid).get()
-
-    if not doc.exists:
+    """The saved progress, or defaults if none exists yet. Never creates data."""
+    ref = userstore.find_user_ref(uid)
+    if ref is None:
         return dict(DEFAULT_PROGRESS)
 
-    data = doc.to_dict() or {}
+    snap = ref.get()
+    data = ((snap.to_dict() or {}).get("onboarding") if snap.exists else None) or None
+    if not data:
+        return dict(DEFAULT_PROGRESS)
 
     return {
         "exists": True,
@@ -52,7 +52,7 @@ def get_progress(uid: str) -> dict:
 
 
 def save_progress(
-    uid: str,
+    user: dict,
     *,
     step: int,
     saved: list[str],
@@ -60,16 +60,22 @@ def save_progress(
     started: bool,
     done: bool,
 ) -> dict:
-    """Create or replace this user's progress document."""
-    db.collection(COLLECTION).document(uid).set(
+    """Save progress. `user` is the signed-in user (creates their document if new)."""
+    ref = userstore.ensure_user_ref(user)
+
+    ref.set(
         {
-            "step": step,
-            "saved": saved,
-            "skipped": skipped,
-            "started": started,
-            "done": done,
-            "updated_at": now_utc(),
-        }
+            "onboarding": {
+                "step": step,
+                "saved": saved,
+                "skipped": skipped,
+                "started": started,
+                "done": done,
+                "updated_at": userstore.now_utc(),
+            },
+            "updated_at": userstore.now_utc(),
+        },
+        merge=True,
     )
 
-    return get_progress(uid)
+    return get_progress(user["uid"])

@@ -1,11 +1,21 @@
-"""Public QR scan endpoints. Never return protected details before DOB verification."""
+"""Public QR scan endpoints. Never return protected details before DOB verification.
+
+WHERE THE DATA COMES FROM
+-------------------------
+  qr_devices/{sha256(token)}       found from the scanned token; says who owns
+                                   the tag (owner_uid) and whether it is active
+  users/{name}__{uid}/...          the owner's profile, contacts and vehicles,
+                                   found through owner_uid (services/userstore.py)
+"""
 import hashlib
 from fastapi import APIRouter, HTTPException, Request
+from google.cloud.firestore_v1.base_query import FieldFilter
 from app.schemas.emergency import DOBVerification
 from app.core.firebase import db
+from app.services import userstore
 from app.services.emergency import (
     verify_qr_dob_and_issue_access,
-    require_valid_access_token, public_profile_view, require_profile,
+    require_valid_access_token, public_profile_view,
 )
 from app.services.subscriptions import require_active_subscription
 from app.services.vehicle_images import responder_photo_urls
@@ -65,16 +75,19 @@ def tag_status(token: str):
 @router.get("/emergency")
 def get_emergency_details(access_token: str):
     # Short-lived access token is passed as query parameter because this route is intended
-    # for a simple QR-scanner web page. Avoid logging query strings at your proxy/app.
+    # for a simple QR-scanner web page. Uvicorn's access log has the token redacted (main.py).
     record = require_valid_access_token(access_token)
     owner_uid = record["owner_uid"]
     require_active_subscription(owner_uid)
-    profile = require_profile(owner_uid)
+    profile = userstore.require_profile(owner_uid)
+
+    user_ref = userstore.find_user_ref(owner_uid)
+    if user_ref is None:
+        raise HTTPException(status_code=404, detail="Emergency details not found.")
 
     contact_docs = (
-        db.collection("emergency_contacts")
-        .where("owner_uid", "==", owner_uid)
-        .where("share_with_responder", "==", True)
+        userstore.contacts_col(user_ref)
+        .where(filter=FieldFilter("share_with_responder", "==", True))
         .stream()
     )
     contacts = [
@@ -89,9 +102,8 @@ def get_emergency_details(access_token: str):
     # Call the highest priority (1) first.
     contacts.sort(key=lambda c: (c["priority"], c["name"]))
 
-    vehicle_docs = db.collection("vehicles").where("owner_uid", "==", owner_uid).stream()
     vehicles = []
-    for doc in vehicle_docs:
+    for doc in userstore.vehicles_col(user_ref).stream():
         v = doc.to_dict() or {}
         vehicles.append({
             "label": v.get("label", ""),

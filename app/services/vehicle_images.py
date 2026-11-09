@@ -1,14 +1,17 @@
-"""Vehicle photos: private storage in Firebase Storage + metadata in Firestore.
+"""Vehicle photos: private storage in Firebase Storage + a list on the vehicle.
+
+WHERE THINGS LIVE
+-----------------
+  Firestore  users/{name}__{uid}/vehicles/{vehicleId}  ->  `images` list:
+                 [{image_id, path, content_type, size, created_at}, ...]
+  Storage    vehicle_images/{uid}/{vehicleId}/{imageId}.jpg   (private bucket)
 
 Rules enforced here (the frontend limits are only for convenience):
   * at most MAX_IMAGES_PER_VEHICLE photos per vehicle,
-  * only the vehicle's owner can add, see or remove them,
+  * a person can only reach vehicles under their OWN document,
   * every upload is validated and re-encoded (see image_clean.py),
   * the bucket stays PRIVATE. Photos are shown through short-lived signed
     links, and storage paths are never sent to the browser.
-
-Firestore: each vehicle document gets an `images` list:
-    [{image_id, path, content_type, size, created_at}, ...]
 
 Photos ARE shown to a responder, but only after a successful date-of-birth
 check on an active tag with an active subscription, and only as links that
@@ -25,7 +28,7 @@ from google.cloud import firestore
 
 from app.config import settings
 from app.core.firebase import db
-from app.services.emergency import now_utc
+from app.services import userstore
 from app.services.image_clean import clean_image
 
 logger = logging.getLogger("uvicorn.error")
@@ -48,9 +51,7 @@ def _bucket():
 def _signed_url(blob, lifetime: timedelta = URL_LIFETIME) -> str | None:
     """A temporary link to a private photo; None if it cannot be signed."""
     try:
-        return blob.generate_signed_url(
-            version="v4", expiration=lifetime, method="GET"
-        )
+        return blob.generate_signed_url(version="v4", expiration=lifetime, method="GET")
     except Exception:  # noqa: BLE001 - signing needs a service-account key
         logger.exception("Could not create a signed URL for a vehicle photo")
         return None
@@ -73,11 +74,9 @@ def public_images(vehicle: dict) -> list[dict]:
 def responder_photo_urls(vehicle: dict) -> list[str]:
     """Temporary photo links for someone who has just passed a tag scan.
 
-    Two differences from `public_images`:
-      * the links last only 10 minutes (the length of a scan's access), and
-      * it NEVER raises. If storage is not configured or signing fails, the
-        responder simply gets no photos. Emergency details must never fail
-        because of a picture.
+    Differences from `public_images`: the links last only 10 minutes, and it
+    NEVER raises. If storage is not configured or signing fails, the responder
+    simply gets no photos. Emergency details must never fail because of a picture.
     """
     entries = vehicle.get("images") or []
     if not entries or not settings.firebase_storage_bucket:
@@ -100,8 +99,8 @@ def responder_photo_urls(vehicle: dict) -> list[str]:
 
 
 @firestore.transactional
-def _append_image(transaction, vehicle_ref, uid: str, entry: dict) -> bool:
-    """Add a photo entry unless the vehicle is gone, not theirs, or full.
+def _append_image(transaction, vehicle_ref, entry: dict) -> bool:
+    """Add a photo entry unless the vehicle is gone or full.
 
     A transaction, so two uploads at once cannot push a vehicle past the limit.
     """
@@ -109,51 +108,49 @@ def _append_image(transaction, vehicle_ref, uid: str, entry: dict) -> bool:
     if not snap.exists:
         return False
 
-    data = snap.to_dict() or {}
-    if data.get("owner_uid") != uid:
-        return False
-
-    images = list(data.get("images") or [])
+    images = list((snap.to_dict() or {}).get("images") or [])
     if len(images) >= MAX_IMAGES_PER_VEHICLE:
         return False
 
     images.append(entry)
-    transaction.update(vehicle_ref, {"images": images, "updated_at": now_utc()})
+    transaction.update(vehicle_ref, {"images": images, "updated_at": userstore.now_utc()})
     return True
 
 
 @firestore.transactional
-def _remove_image(transaction, vehicle_ref, uid: str, image_id: str):
+def _remove_image(transaction, vehicle_ref, image_id: str):
     """Remove one photo entry. Returns its storage path, or None if not found."""
     snap = vehicle_ref.get(transaction=transaction)
     if not snap.exists:
         return None
 
-    data = snap.to_dict() or {}
-    if data.get("owner_uid") != uid:
+    images = list((snap.to_dict() or {}).get("images") or [])
+    removed = next((e for e in images if e.get("image_id") == image_id), None)
+    if removed is None:
         return None
 
-    images = list(data.get("images") or [])
     kept = [e for e in images if e.get("image_id") != image_id]
-    if len(kept) == len(images):
-        return None
-
-    removed = next(e for e in images if e.get("image_id") == image_id)
-    transaction.update(vehicle_ref, {"images": kept, "updated_at": now_utc()})
+    transaction.update(vehicle_ref, {"images": kept, "updated_at": userstore.now_utc()})
     return removed.get("path")
+
+
+def _own_vehicle_ref(uid: str, vehicle_id: str):
+    """This person's vehicle document. 404 (not 403) for anything else, so
+    other people's vehicles are not revealed."""
+    user_ref = userstore.find_user_ref(uid)
+    if user_ref is None:
+        raise HTTPException(status_code=404, detail="Vehicle not found.")
+    return userstore.vehicles_col(user_ref).document(vehicle_id)
 
 
 def add_image(uid: str, vehicle_id: str, upload: UploadFile) -> dict:
     """Validate, store and record one photo. Returns {image_id, url}."""
-    vehicle_ref = db.collection("vehicles").document(vehicle_id)
+    vehicle_ref = _own_vehicle_ref(uid, vehicle_id)
     snap = vehicle_ref.get()
-    data = (snap.to_dict() or {}) if snap.exists else {}
-
-    # 404 (not 403) so the existence of other people's vehicles is not revealed.
-    if not snap.exists or data.get("owner_uid") != uid:
+    if not snap.exists:
         raise HTTPException(status_code=404, detail="Vehicle not found.")
 
-    if len(data.get("images") or []) >= MAX_IMAGES_PER_VEHICLE:
+    if len((snap.to_dict() or {}).get("images") or []) >= MAX_IMAGES_PER_VEHICLE:
         raise HTTPException(
             status_code=409,
             detail=f"A vehicle can have at most {MAX_IMAGES_PER_VEHICLE} photos.",
@@ -179,11 +176,11 @@ def add_image(uid: str, vehicle_id: str, upload: UploadFile) -> dict:
         "path": path,
         "content_type": "image/jpeg",
         "size": len(jpeg),
-        "created_at": now_utc(),
+        "created_at": userstore.now_utc(),
     }
 
     try:
-        added = _append_image(db.transaction(), vehicle_ref, uid, entry)
+        added = _append_image(db.transaction(), vehicle_ref, entry)
     except Exception:
         blob.delete()  # do not leave an orphan file behind
         raise
@@ -200,8 +197,8 @@ def add_image(uid: str, vehicle_id: str, upload: UploadFile) -> dict:
 
 def delete_image(uid: str, vehicle_id: str, image_id: str) -> None:
     """Remove one photo (record first, then the stored file)."""
-    vehicle_ref = db.collection("vehicles").document(vehicle_id)
-    path = _remove_image(db.transaction(), vehicle_ref, uid, image_id)
+    vehicle_ref = _own_vehicle_ref(uid, vehicle_id)
+    path = _remove_image(db.transaction(), vehicle_ref, image_id)
 
     if path is None:
         raise HTTPException(status_code=404, detail="Photo not found.")

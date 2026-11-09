@@ -72,6 +72,7 @@ def main() -> None:
                 "tag_ref": tag_ref,
                 "label": "SafeLink tag",
                 "owner_uid": None,   # unclaimed
+                "owner_ref": None,   # filled in on claim: the owner's document name
                 "active": False,     # switched on when claimed
                 "sold": bool(args.sold),
                 "failed_attempts": 0,

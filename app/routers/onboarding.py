@@ -47,7 +47,7 @@ def save_my_progress(
 ):
     """Save this user's onboarding progress (no subscription needed)."""
     return onboarding_service.save_progress(
-        user["uid"],
+        user,
         step=body.step,
         saved=sorted(set(body.saved)),
         skipped=sorted(set(body.skipped)),

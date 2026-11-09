@@ -29,4 +29,4 @@ def lookup_tag(body: ClaimLookup, user: dict = Depends(current_user)):
 
 @router.post("/qr-tags/claim/confirm")
 def confirm_tag(body: ClaimConfirm, user: dict = Depends(current_user)):
-    return tag_claim.confirm(user["uid"], body.token, body.label)
+    return tag_claim.confirm(user, body.token, body.label)

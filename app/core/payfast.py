@@ -68,3 +68,24 @@ def validate_itn_with_payfast(form_data: dict) -> bool:
         return response.status_code == 200 and response.text.strip() == "VALID"
     except requests.RequestException:
         return False
+
+
+def describe_signature_inputs(data: dict) -> str:
+    """Field ORDER and LENGTHS used for a signature, for safe logging.
+
+    Contains no values, so it cannot leak keys or the passphrase. Use it to
+    check the order against PayFast's documentation and to spot a field that
+    is blank or longer than PayFast allows.
+    """
+    used, blank = [], []
+    for key, value in data.items():
+        if key == "signature":
+            continue
+        if value is None or str(value).strip() == "":
+            blank.append(key)
+        else:
+            used.append(f"{key}({len(str(value).strip())})")
+    text = "order=" + ",".join(used)
+    if blank:
+        text += " blank=" + ",".join(blank)
+    return text

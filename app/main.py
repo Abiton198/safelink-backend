@@ -1,4 +1,5 @@
 """SafeLink API entry point."""
+import asyncio
 import logging
 import re
 from contextlib import asynccontextmanager
@@ -41,6 +42,54 @@ logging.getLogger("uvicorn.access").addFilter(RedactAccessToken())
 
 
 # ---------------------------------------------------------------------------
+# Migration reminder
+# ---------------------------------------------------------------------------
+# Everything about a person now lives under users/{name}__{uid} (see
+# docs/FIRESTORE_STRUCTURE.md). These were the OLD top-level collections. If one
+# still holds data, either the migration has not been run yet (the app will
+# show empty accounts until it is), or it ran but the old copies have not been
+# cleaned up. Either way, say so in the log. Non-fatal: it never blocks startup.
+OLD_COLLECTIONS = (
+    "emergency_profiles",
+    "emergency_contacts",
+    "vehicles",
+    "subscriptions",
+    "onboarding",
+    "payment_transactions",
+    "payment_orders",
+)
+
+
+def _old_collections_with_data() -> list[str]:
+    from app.core.firebase import db  # imported here so a Firestore problem cannot stop the app loading
+
+    return [
+        name
+        for name in OLD_COLLECTIONS
+        if any(True for _ in db.collection(name).limit(1).stream())
+    ]
+
+
+async def _warn_if_not_migrated() -> None:
+    try:
+        leftovers = await asyncio.wait_for(
+            asyncio.to_thread(_old_collections_with_data), timeout=10
+        )
+    except Exception:  # noqa: BLE001 - a slow or unreachable Firestore must not stop startup
+        logger.warning("Could not check for old Firestore collections at startup.")
+        return
+
+    if leftovers:
+        logger.warning(
+            "Old Firestore collections still hold data: %s. If you have NOT migrated, "
+            "run `python -m scripts.migrate_to_user_documents --apply` (the app shows "
+            "empty accounts until you do). If you HAVE migrated and everything works, "
+            "clean up with `--apply --delete-old`.",
+            ", ".join(leftovers),
+        )
+
+
+# ---------------------------------------------------------------------------
 # Startup summary (never prints secrets)
 # ---------------------------------------------------------------------------
 @asynccontextmanager
@@ -63,12 +112,13 @@ async def lifespan(_: FastAPI):
     )
     if missing_payfast:
         logger.warning("PayFast settings missing: %s", ", ".join(missing_payfast))
+    await _warn_if_not_migrated()
     yield
 
 
 app = FastAPI(
     title="SafeLink API",
-    version="0.1.0",
+    version="0.2.0",  # 0.2: one Firestore document per person (docs/FIRESTORE_STRUCTURE.md)
     description="SafeLink account, emergency profile, QR access, subscription, and payment foundation.",
     lifespan=lifespan,
 )
@@ -131,4 +181,4 @@ app.include_router(qr_claim.router, prefix="/api/v1")
 
 @app.get("/")
 def root():
-    return {"service": "SafeLink API", "version": "0.1.0", "docs": "/docs"}
+    return {"service": "SafeLink API", "version": "0.2.0", "docs": "/docs"}

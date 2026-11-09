@@ -1,24 +1,24 @@
-"""Firestore-backed subscription operations and access policy.
+"""Subscription operations and access policy.
 
-HOW THIS ALIGNS WITH THE FRONTEND ONBOARDING
---------------------------------------------
-A new owner can SAVE or SKIP every setup step (profile, contacts, vehicles,
-claim tag) BEFORE subscribing. Only at the very last step does the frontend
-open the PayFast gateway. So the backend rule is:
+WHERE THE DATA LIVES
+--------------------
+A person's subscription is the `subscription` map inside their root document
+(users/{name}__{uid}), so it is read together with their other account data.
+See services/userstore.py for the whole structure.
+
+ACCESS RULES (unchanged)
+------------------------
+A new owner can SAVE or SKIP every setup step BEFORE subscribing. So:
 
   * Owner set-up endpoints   -> NO subscription needed
-        profile, contacts, vehicles, qr-tags (list/claim/deactivate),
-        onboarding progress, subscription status, payments/checkout,
-        subscription cancel
+        profile, contacts, vehicles, photos, tags (claim/list/deactivate),
+        onboarding, subscription status, payments/checkout, cancel
   * Releasing emergency data -> subscription REQUIRED
         the public QR verify / emergency endpoints (what a scanner sees)
 
-Use `Depends(require_active_subscription)` ONLY on the second group.
-Emergency access therefore switches on when the subscription is active, and
-never before.
-
-This is an application-level check. It does not replace secure Firestore
-rules or verification of payment-provider notifications (PayFast ITN).
+Use `require_active_subscription` ONLY on the second group.
+This is an application-level check; it does not replace verifying PayFast's
+notifications.
 """
 
 from datetime import datetime, timezone
@@ -26,7 +26,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from app.core.firebase import db
+from app.services import userstore
 
 # Statuses that count as "emergency access is on".
 ALLOWED_STATUSES = {
@@ -70,13 +70,40 @@ def normalise_datetime(value: Any) -> datetime | None:
 
 
 def get_subscription(uid: str) -> dict | None:
-    """Return the subscription belonging to this authenticated user."""
-    doc = db.collection("subscriptions").document(uid).get()
-
-    if not doc.exists:
+    """The `subscription` map of this user's document, or None if there is none."""
+    ref = userstore.find_user_ref(uid)
+    if ref is None:
         return None
 
-    return doc.to_dict() or {}
+    snap = ref.get()
+    if not snap.exists:
+        return None
+
+    return (snap.to_dict() or {}).get("subscription") or None
+
+
+def update_subscription(user_ref, fields: dict) -> None:
+    """Merge `fields` into the user's `subscription` map (other fields are kept)."""
+    user_ref.set({"subscription": fields, "updated_at": now_utc()}, merge=True)
+
+
+def mark_cancellation_requested(uid: str, reason: str | None) -> None:
+    """Record that the owner asked to cancel (used by the cancel endpoint).
+
+    This records the request only. It does not cancel the PayFast agreement.
+    """
+    ref = userstore.find_user_ref(uid)
+    if ref is None or get_subscription(uid) is None:
+        raise HTTPException(status_code=404, detail="No subscription found.")
+
+    update_subscription(
+        ref,
+        {
+            "cancellation_requested": True,
+            "cancellation_reason": reason,
+            "cancellation_requested_at": now_utc(),
+        },
+    )
 
 
 def access_problem(subscription: dict | None) -> str | None:
@@ -121,7 +148,6 @@ def require_active_subscription(uid: str) -> dict:
     """Reject requests unless the user's subscription is currently eligible.
 
     Use ONLY where emergency information is released (see module docstring).
-    Do NOT use it on onboarding / set-up endpoints.
     """
 
     subscription = get_subscription(uid)
