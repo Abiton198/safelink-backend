@@ -6,27 +6,24 @@ A person's subscription is the `subscription` map inside their root document
 (users/{name}__{uid}), so it is read together with their other account data.
 See services/userstore.py for the whole structure.
 
-ACCESS RULES (unchanged)
+ACCESS RULES
 ------------------------
-A new owner can SAVE or SKIP every setup step BEFORE subscribing. So:
-
-  * Owner set-up endpoints   -> NO subscription needed
+- Owner set-up endpoints   -> NO subscription needed
         profile, contacts, vehicles, photos, tags (claim/list/deactivate),
         onboarding, subscription status, payments/checkout, cancel
-  * Releasing emergency data -> subscription REQUIRED
+- Releasing emergency data -> Active subscription OR active trial period REQUIRED
         the public QR verify / emergency endpoints (what a scanner sees)
-
-Use `require_active_subscription` ONLY on the second group.
-This is an application-level check; it does not replace verifying PayFast's
-notifications.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import HTTPException
 
 from app.services import userstore
+
+# Default trial length in days for new users without a paid subscription
+TRIAL_DAYS = 14
 
 # Statuses that count as "emergency access is on".
 ALLOWED_STATUSES = {
@@ -42,12 +39,7 @@ def now_utc() -> datetime:
 
 
 def normalise_datetime(value: Any) -> datetime | None:
-    """Convert supported Firestore/Python date values to aware UTC datetimes.
-
-    Firestore normally returns datetime objects. ISO strings are also
-    handled to make the expiry check more robust.
-    """
-
+    """Convert supported Firestore/Python date values to aware UTC datetimes."""
     if value is None:
         return None
 
@@ -55,31 +47,90 @@ def normalise_datetime(value: Any) -> datetime | None:
         try:
             value = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
-            # An unrecognised expiry must not silently grant access.
             return None
 
     if not isinstance(value, datetime):
         return None
 
     if value.tzinfo is None:
-        # Treat naive values as UTC rather than comparing incompatible
-        # naive and timezone-aware datetime objects.
         value = value.replace(tzinfo=timezone.utc)
 
     return value.astimezone(timezone.utc)
 
 
-def get_subscription(uid: str) -> dict | None:
-    """The `subscription` map of this user's document, or None if there is none."""
+def get_user_doc(uid: str) -> dict:
+    """Return the full user root document dictionary, or empty dict if missing."""
     ref = userstore.find_user_ref(uid)
     if ref is None:
-        return None
+        return {}
 
     snap = ref.get()
     if not snap.exists:
-        return None
+        return {}
 
-    return (snap.to_dict() or {}).get("subscription") or None
+    return snap.to_dict() or {}
+
+
+def get_subscription(uid: str) -> dict | None:
+    """The `subscription` map of this user's document, or None if there is none."""
+    return get_user_doc(uid).get("subscription") or None
+
+
+def get_trial_end(user_doc: dict) -> datetime | None:
+    """Determine when the user's free trial expires."""
+    subscription = user_doc.get("subscription") or {}
+
+    # 1. Explicit trial end on subscription map or root user document
+    explicit_end = normalise_datetime(
+        subscription.get("trial_ends_at") or user_doc.get("trial_ends_at")
+    )
+    if explicit_end is not None:
+        return explicit_end
+
+    # 2. Fallback: calculate from user account creation timestamp
+    created_at = normalise_datetime(user_doc.get("created_at"))
+    if created_at is not None:
+        return created_at + timedelta(days=TRIAL_DAYS)
+
+    return None
+
+
+def get_trial_info(user_doc: dict) -> dict:
+    """Return trial status and exact countdown details for the frontend."""
+    subscription = user_doc.get("subscription") or {}
+    status = subscription.get("status")
+
+    # If user already has an active paid plan, trial countdown is not needed
+    if status in {"active", "past_due_grace"}:
+        return {
+            "is_trial": False,
+            "trial_active": False,
+            "trial_ends_at": None,
+            "trial_days_remaining": 0,
+            "trial_seconds_remaining": 0,
+        }
+
+    trial_end = get_trial_end(user_doc)
+    if trial_end is None:
+        return {
+            "is_trial": False,
+            "trial_active": False,
+            "trial_ends_at": None,
+            "trial_days_remaining": 0,
+            "trial_seconds_remaining": 0,
+        }
+
+    remaining = trial_end - now_utc()
+    seconds_left = max(0, int(remaining.total_seconds()))
+    days_left = max(0, (seconds_left + 86399) // 86400)  # ceiling days remaining
+
+    return {
+        "is_trial": seconds_left > 0,
+        "trial_active": seconds_left > 0,
+        "trial_ends_at": trial_end.isoformat(),
+        "trial_days_remaining": days_left,
+        "trial_seconds_remaining": seconds_left,
+    }
 
 
 def update_subscription(user_ref, fields: dict) -> None:
@@ -88,10 +139,7 @@ def update_subscription(user_ref, fields: dict) -> None:
 
 
 def mark_cancellation_requested(uid: str, reason: str | None) -> None:
-    """Record that the owner asked to cancel (used by the cancel endpoint).
-
-    This records the request only. It does not cancel the PayFast agreement.
-    """
+    """Record that the owner asked to cancel (used by the cancel endpoint)."""
     ref = userstore.find_user_ref(uid)
     if ref is None or get_subscription(uid) is None:
         raise HTTPException(status_code=404, detail="No subscription found.")
@@ -106,16 +154,37 @@ def mark_cancellation_requested(uid: str, reason: str | None) -> None:
     )
 
 
-def access_problem(subscription: dict | None) -> str | None:
-    """Explain why a subscription does NOT grant access, or None if it does.
+def access_problem(subscription: dict | None, user_doc: dict | None = None) -> str | None:
+    """Explain why a subscription/trial does NOT grant access, or None if it does."""
+    now = now_utc()
 
-    Never raises. This is the single place that decides eligibility, used by
-    both `require_active_subscription` (raises) and
-    `get_subscription_summary` (reports to the frontend).
-    """
+    # 1. Check active paid or explicitly trialing subscription first
+    if subscription and subscription.get("status") in ALLOWED_STATUSES:
+        period_end_value = subscription.get("current_period_end")
+        if period_end_value is not None:
+            period_end = normalise_datetime(period_end_value)
+            if period_end is None:
+                return (
+                    "Your subscription expiry could not be verified. "
+                    "Please contact SafeLink support."
+                )
+            if period_end > now:
+                return None
+        else:
+            return None
 
+    # 2. Check if user is within their automatic free trial period
+    if user_doc is not None:
+        trial_info = get_trial_info(user_doc)
+        if trial_info["trial_active"]:
+            return None
+
+    # 3. Neither paid subscription nor active trial
     if not subscription:
-        return "An active SafeLink subscription is required."
+        return (
+            "Your free trial period has ended. "
+            "Please subscribe to keep SafeLink emergency access active."
+        )
 
     if subscription.get("status") not in ALLOWED_STATUSES:
         return (
@@ -123,66 +192,51 @@ def access_problem(subscription: dict | None) -> str | None:
             "Please renew to continue."
         )
 
-    period_end_value = subscription.get("current_period_end")
-
-    if period_end_value is not None:
-        period_end = normalise_datetime(period_end_value)
-
-        # Fail closed if an expiry was set but cannot be interpreted.
-        if period_end is None:
-            return (
-                "Your subscription expiry could not be verified. "
-                "Please contact SafeLink support."
-            )
-
-        if period_end <= now_utc():
-            return (
-                "Your SafeLink subscription has expired. "
-                "Please renew to continue."
-            )
-
-    return None
+    return (
+        "Your SafeLink subscription has expired. "
+        "Please renew to continue."
+    )
 
 
 def require_active_subscription(uid: str) -> dict:
-    """Reject requests unless the user's subscription is currently eligible.
-
-    Use ONLY where emergency information is released (see module docstring).
-    """
-
-    subscription = get_subscription(uid)
-    problem = access_problem(subscription)
+    """Reject requests unless the user is in a valid trial period or subscribed."""
+    user_doc = get_user_doc(uid)
+    subscription = user_doc.get("subscription") or None
+    problem = access_problem(subscription, user_doc=user_doc)
 
     if problem:
         raise HTTPException(status_code=402, detail=problem)
 
-    return subscription  # type: ignore[return-value]
+    trial_info = get_trial_info(user_doc)
+    return {
+        **(subscription or {"status": "trialing"}),
+        **trial_info,
+    }
 
 
 def get_subscription_summary(uid: str) -> dict:
-    """Safe, always-successful status for GET /api/v1/subscriptions/me.
-
-    A user who has not subscribed yet is a NORMAL state during onboarding,
-    so this returns 200 with status "not_started" instead of an error.
-    Only non-sensitive fields are returned (never PayFast tokens).
-    """
-
-    subscription = get_subscription(uid)
+    """Safe, always-successful status for GET /api/v1/subscriptions/me."""
+    user_doc = get_user_doc(uid)
+    subscription = user_doc.get("subscription") or None
+    trial_info = get_trial_info(user_doc)
+    has_access = access_problem(subscription, user_doc=user_doc) is None
 
     if not subscription:
         return {
-            "status": "not_started",
-            "has_access": False,
+            "status": "trialing" if trial_info["trial_active"] else "not_started",
+            "has_access": has_access,
             "subscription": None,
+            **trial_info,
         }
 
     period_end = normalise_datetime(subscription.get("current_period_end"))
 
     return {
         "status": subscription.get("status", "not_started"),
-        "has_access": access_problem(subscription) is None,
+        "has_access": has_access,
         "subscription": {
             "plan_id": subscription.get("plan_id"),
             "current_period_end": period_end.isoformat() if period_end else None,
         },
+        **trial_info,
     }
