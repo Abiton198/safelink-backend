@@ -8,6 +8,7 @@ WHERE THE DATA COMES FROM
                                    found through owner_uid (services/userstore.py)
 """
 import hashlib
+import hmac
 import os
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -18,7 +19,9 @@ from app.core.firebase import db
 from app.services import userstore
 from app.services.emergency import (
     verify_qr_dob_and_issue_access,
-    require_valid_access_token, public_profile_view,
+    require_valid_access_token,
+    public_profile_view,
+    dob_digest,
 )
 from app.services.subscriptions import require_active_subscription, get_trial_info
 from app.services.vehicle_images import responder_photo_urls
@@ -37,14 +40,19 @@ class AlertContactsRequest(BaseModel):
 
 class RevealNumbersRequest(BaseModel):
     access_token: str
-    birth_year: str = Field(..., pattern=r"^\d{4}$")
+    date_of_birth: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
 
 
 async def send_via_twilio(to_number: str, body: str) -> bool:
     """Send WhatsApp or SMS alert via Twilio without revealing numbers to client."""
-    formatted_to = to_number if to_number.startswith("whatsapp:") else f"whatsapp:{to_number}"
-    formatted_from = TWILIO_FROM_NUMBER if TWILIO_FROM_NUMBER.startswith(
-        "whatsapp:") else f"whatsapp:{TWILIO_FROM_NUMBER}"
+    formatted_to = (
+        to_number if to_number.startswith("whatsapp:") else f"whatsapp:{to_number}"
+    )
+    formatted_from = (
+        TWILIO_FROM_NUMBER
+        if TWILIO_FROM_NUMBER.startswith("whatsapp:")
+        else f"whatsapp:{TWILIO_FROM_NUMBER}"
+    )
 
     if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_FROM_NUMBER):
         print(f"[DEV ALERT] To: {formatted_to} | Message: {body}")
@@ -79,11 +87,15 @@ def verify_scanned_qr(token: str, body: DOBVerification, request: Request):
         )
 
     if not qr.get("active", False):
-        raise HTTPException(status_code=410, detail="This SafeLink tag has been deactivated.")
+        raise HTTPException(
+            status_code=410, detail="This SafeLink tag has been deactivated."
+        )
 
     require_active_subscription(owner_uid)
 
-    access_token = verify_qr_dob_and_issue_access(qr_hash, body.date_of_birth.isoformat())
+    access_token = verify_qr_dob_and_issue_access(
+        qr_hash, body.date_of_birth.isoformat()
+    )
     return {
         "message": "Verification successful. This access token expires in 10 minutes.",
         "access_token": access_token,
@@ -126,31 +138,34 @@ def get_emergency_details(access_token: str):
         c = d.to_dict() or {}
         raw_phone = c.get("phone", "")
         masked_phone = f"•••• {raw_phone[-4:]}" if len(raw_phone) >= 4 else "••••"
-        contacts.append({
-            "name": c.get("name", ""),
-            "relationship": c.get("relationship", ""),
-            "phone_masked": masked_phone,
-            "priority": c.get("priority", 10),
-        })
+        contacts.append(
+            {
+                "name": c.get("name", ""),
+                "relationship": c.get("relationship", ""),
+                "phone_masked": masked_phone,
+                "priority": c.get("priority", 10),
+            }
+        )
 
     contacts.sort(key=lambda c: (c["priority"], c["name"]))
 
     vehicles = []
     for doc in userstore.vehicles_col(user_doc).stream():
         v = doc.to_dict() or {}
-        vehicles.append({
-            "label": v.get("label", ""),
-            "make": v.get("make", ""),
-            "model": v.get("model", ""),
-            "colour": v.get("colour", ""),
-            "registration_number": v.get("registration_number", ""),
-            "tracker_provider": v.get("tracker_provider", ""),
-            "tracker_reference": v.get("tracker_reference", ""),
-            "notes": v.get("notes", ""),
-            "photos": responder_photo_urls(v),
-        })
+        vehicles.append(
+            {
+                "label": v.get("label", ""),
+                "make": v.get("make", ""),
+                "model": v.get("model", ""),
+                "colour": v.get("colour", ""),
+                "registration_number": v.get("registration_number", ""),
+                "tracker_provider": v.get("tracker_provider", ""),
+                "tracker_reference": v.get("tracker_reference", ""),
+                "notes": v.get("notes", ""),
+                "photos": responder_photo_urls(v),
+            }
+        )
 
-    # Retrieve trial information for frontend countdown banner
     full_user_dict = user_doc.get().to_dict() or {}
     trial_info = get_trial_info(full_user_dict)
 
@@ -181,17 +196,22 @@ async def alert_priority_contacts(payload: AlertContactsRequest):
         .stream()
     )
 
+    all_contacts = [d.to_dict() or {} for d in contact_docs]
     priority_contacts = sorted(
-        [c.to_dict() or {} for d in contact_docs for c in [d] if c.get("phone")],
-        key=lambda c: c.get("priority", 99),
+        [c for c in all_contacts if c.get("phone")],
+        key=lambda c: (c.get("priority", 99), c.get("name", "")),
     )
 
     if not priority_contacts:
-        raise HTTPException(status_code=404, detail="No priority contacts with phone numbers found.")
+        raise HTTPException(
+            status_code=404, detail="No priority contacts with phone numbers found."
+        )
 
     profile = userstore.require_profile(owner_uid)
     owner_name = profile.get("display_name", "SafeLink User")
-    alert_text = f"SAFELINK EMERGENCY ALERT for {owner_name}: {payload.message.strip()}"
+    alert_text = (
+        f"SAFELINK EMERGENCY ALERT for {owner_name}: {payload.message.strip()}"
+    )
 
     sent_count = 0
     for contact in priority_contacts:
@@ -200,7 +220,9 @@ async def alert_priority_contacts(payload: AlertContactsRequest):
             sent_count += 1
 
     if sent_count == 0:
-        raise HTTPException(status_code=502, detail="Failed to dispatch emergency alerts.")
+        raise HTTPException(
+            status_code=502, detail="Failed to dispatch emergency alerts."
+        )
 
     return {
         "ok": True,
@@ -211,17 +233,19 @@ async def alert_priority_contacts(payload: AlertContactsRequest):
 
 @router.post("/emergency/reveal-numbers")
 def reveal_contact_numbers(payload: RevealNumbersRequest):
-    """Verify 4-digit year of birth passcode before releasing raw phone numbers."""
+    """Verify the owner's masked DOB passcode before releasing raw phone numbers."""
     record = require_valid_access_token(payload.access_token)
     owner_uid = record["owner_uid"]
     require_active_subscription(owner_uid)
 
     profile = userstore.require_profile(owner_uid)
-    stored_dob = profile.get("date_of_birth", "")
-    stored_year = stored_dob.split("-")[0] if stored_dob else ""
+    stored_hmac = profile.get("dob_hmac", "")
+    candidate_hmac = dob_digest(payload.date_of_birth)
 
-    if not stored_year or payload.birth_year.strip() != stored_year:
-        raise HTTPException(status_code=403, detail="Incorrect year of birth passcode.")
+    if not stored_hmac or not hmac.compare_digest(stored_hmac, candidate_hmac):
+        raise HTTPException(
+            status_code=403, detail="Incorrect date of birth passcode."
+        )
 
     user_ref = userstore.find_user_ref(owner_uid)
     if user_ref is None:
@@ -233,7 +257,7 @@ def reveal_contact_numbers(payload: RevealNumbersRequest):
         .stream()
     )
 
-    contacts = [c.to_dict() or {} for d in contact_docs for c in [d]]
+    contacts = [d.to_dict() or {} for d in contact_docs]
     contacts.sort(key=lambda c: (c.get("priority", 10), c.get("name", "")))
 
     numbers_map = {
